@@ -79,3 +79,5 @@ jobs:
             Format-Table -AutoSize
 
           Write-Host "diagnostic_complete=yes"
+
+# recycle-safe recovery trigger
