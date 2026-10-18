@@ -1,0 +1,94 @@
+name: Emergency GoMCP Recover
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/emergency-gomcp-recover.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 7
+    steps:
+      - name: Conservative GoMCP recovery
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'C:\actions-runner\GoMCP'
+          $critical = @(
+            (Join-Path $root 'gomcp.js'),
+            (Join-Path $root 'supervisor.js'),
+            (Join-Path $root 'Start-GoMCP-UserAdmin.ps1'),
+            (Join-Path $root 'state\upstream.secret'),
+            (Join-Path $root 'state\relay.secret'),
+            'C:\ProgramData\SentionceTunnels\gamepc-mcp.yml'
+          )
+
+          Write-Host '=== PRECHECK ==='
+          $missing = @()
+          foreach ($p in $critical) {
+            $ok = Test-Path $p
+            Write-Host ("exists=" + $ok + " path=" + $p)
+            if (-not $ok) { $missing += $p }
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host 'recovery_aborted=critical_files_missing'
+            throw ('Missing critical recovery files: ' + ($missing -join ', '))
+          }
+
+          $task = Get-ScheduledTask -TaskName 'GoMCP User Admin' -ErrorAction Stop
+          Write-Host ("task_before=" + $task.State)
+
+          Write-Host '=== RESTART EXISTING ADMIN TASK ==='
+          try {
+            if ($task.State -eq 'Running') {
+              Stop-ScheduledTask -TaskName 'GoMCP User Admin' -ErrorAction Stop
+              Start-Sleep -Seconds 2
+            }
+          } catch {
+            Write-Host ("task_stop_warning=" + $_.Exception.Message)
+          }
+
+          Start-ScheduledTask -TaskName 'GoMCP User Admin' -ErrorAction Stop
+          Start-Sleep -Seconds 12
+
+          Write-Host '=== LOCAL VERIFY ==='
+          $listener = Get-NetTCPConnection -State Listen -LocalPort 8882 -ErrorAction SilentlyContinue
+          if ($listener) {
+            $listener | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize
+            Write-Host 'gomcp_8882=listening'
+          } else {
+            Write-Host 'gomcp_8882=not_listening'
+          }
+
+          $node = Get-Process node -ErrorAction SilentlyContinue
+          $cf = Get-Process cloudflared -ErrorAction SilentlyContinue
+          Write-Host ("node_count=" + @($node).Count)
+          Write-Host ("cloudflared_count=" + @($cf).Count)
+
+          Write-Host '=== PUBLIC ROUTE PROBES ==='
+          foreach ($url in @('https://gamepc-mcp.sentionce.net/mcp','https://hq.sentionce.net/')) {
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -Uri $url -Method Get -TimeoutSec 10
+              Write-Host ("url=" + $url + " status=" + [int]$r.StatusCode)
+            } catch {
+              $status = $null
+              try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($status) {
+                Write-Host ("url=" + $url + " status=" + $status)
+              } else {
+                Write-Host ("url=" + $url + " error=" + $_.Exception.Message)
+              }
+            }
+          }
+
+          if (-not $listener) {
+            throw 'GoMCP did not restore listener 8882 after scheduled-task restart'
+          }
+
+          Write-Host 'recovery_result=gomcp_listener_restored'
