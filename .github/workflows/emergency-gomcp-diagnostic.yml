@@ -1,0 +1,81 @@
+name: Emergency GoMCP Diagnostic
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/emergency-gomcp-diagnostic.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 5
+    steps:
+      - name: Inspect GamePC recovery state
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Write-Host "=== HOST ==="
+          Write-Host ("computer=" + $env:COMPUTERNAME)
+          Write-Host ("user=" + $env:USERNAME)
+          Write-Host ("time=" + (Get-Date).ToString("o"))
+          try { Write-Host ("uptime_boot=" + (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString("o")) } catch {}
+
+          Write-Host "=== PATHS ==="
+          $paths = @(
+            'C:\actions-runner\GoMCP',
+            'C:\actions-runner\GoMCP\gomcp.js',
+            'C:\actions-runner\GoMCP\supervisor.js',
+            'C:\actions-runner\GoMCP\Start-GoMCP-UserAdmin.ps1',
+            'C:\actions-runner\GoMCP\state',
+            'C:\ProgramData\SentionceTunnels\gamepc-mcp.yml',
+            'E:\AIExperiments\Ornith35B-Harness\backups\pre-dsh-mobile-20261018-0730'
+          )
+          foreach ($p in $paths) { Write-Host ("exists=" + (Test-Path $p) + " path=" + $p) }
+
+          Write-Host "=== GOMCP ROOT NAMES ONLY ==="
+          if (Test-Path 'C:\actions-runner\GoMCP') {
+            Get-ChildItem 'C:\actions-runner\GoMCP' -Force -ErrorAction SilentlyContinue |
+              Select-Object -First 80 Name,Length,LastWriteTime |
+              Format-Table -AutoSize
+          }
+
+          Write-Host "=== SCHEDULED TASK ==="
+          try {
+            $t = Get-ScheduledTask -TaskName 'GoMCP User Admin' -ErrorAction Stop
+            Write-Host ("task_state=" + $t.State)
+            foreach ($a in $t.Actions) {
+              Write-Host ("task_execute=" + $a.Execute)
+              Write-Host ("task_arguments=" + $a.Arguments)
+            }
+          } catch { Write-Host ("task_error=" + $_.Exception.Message) }
+
+          Write-Host "=== PROCESSES ==="
+          Get-Process node,cloudflared,powershell,pwsh -ErrorAction SilentlyContinue |
+            Select-Object Id,ProcessName,StartTime |
+            Sort-Object ProcessName,Id |
+            Format-Table -AutoSize
+
+          Write-Host "=== LISTENERS 8882 / 18787 / 18765 ==="
+          foreach ($port in 8882,18787,18765) {
+            try {
+              $rows = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop
+              if ($rows) { $rows | Select-Object LocalAddress,LocalPort,OwningProcess | Format-Table -AutoSize }
+            } catch { Write-Host ("no_listener=" + $port) }
+          }
+
+          Write-Host "=== SERVICES CONTAINING CLOUDFLARE / ACTIONS ==="
+          Get-Service -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'cloudfl|actions|runner' -or $_.DisplayName -match 'cloudfl|actions|runner' } |
+            Select-Object Name,DisplayName,Status,StartType |
+            Format-Table -AutoSize
+
+          Write-Host "=== DISK ==="
+          Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" |
+            Select-Object DeviceID,Size,FreeSpace |
+            Format-Table -AutoSize
+
+          Write-Host "diagnostic_complete=yes"
